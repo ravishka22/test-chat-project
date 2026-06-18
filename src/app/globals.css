@@ -1005,6 +1005,43 @@ a {
   font-size: 9px;
 }
 
+.crawl-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-top: 3px;
+}
+
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted) !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+}
+
+.toggle-row input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--plum);
+}
+
+.mini-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted) !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+}
+
+.mini-field input {
+  width: 66px;
+  padding: 7px 8px;
+}
+
 .field textarea {
   min-height: 150px;
   resize: vertical;

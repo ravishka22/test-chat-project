@@ -6,6 +6,8 @@ out
 .env.*.local
 data/*.db
 data/*.db-*
+storage
+apify_storage
 npm-debug.log*
 *.tsbuildinfo
 .DS_Store

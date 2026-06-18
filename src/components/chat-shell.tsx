@@ -231,7 +231,7 @@ export function ChatShell() {
           </div>
           <span className="model-label">
             <Sparkles size={14} />
-            Gemini
+            Open source
           </span>
         </header>
 

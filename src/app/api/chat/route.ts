@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { db } from "@/lib/db";
-import { generateGroundedAnswer } from "@/lib/gemini";
+import { getReadyResourceCount } from "@/lib/db";
+import { generateGroundedAnswer } from "@/lib/ai";
 import { retrieveRelevantChunks } from "@/lib/retrieval";
 import type { Source } from "@/lib/types";
 
@@ -54,11 +54,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const readyCount = (
-      db
-        .prepare("SELECT COUNT(*) AS count FROM resources WHERE status = 'ready'")
-        .get() as { count: number }
-    ).count;
+    const readyCount = await getReadyResourceCount();
 
     if (!readyCount) {
       return NextResponse.json({

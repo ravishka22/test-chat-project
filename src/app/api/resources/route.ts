@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAdminAuthenticated } from "@/lib/auth";
-import { db, listResources } from "@/lib/db";
+import { listResources, query } from "@/lib/db";
 import { ingestResource } from "@/lib/ingest";
 import type { ResourceType } from "@/lib/types";
 
@@ -13,7 +13,7 @@ async function unauthorized() {
 
 export async function GET() {
   if (!(await isAdminAuthenticated())) return unauthorized();
-  return NextResponse.json({ resources: listResources() });
+  return NextResponse.json({ resources: await listResources() });
 }
 
 function inferFileType(file: File): ResourceType | null {
@@ -49,10 +49,14 @@ export async function POST(request: Request) {
     let content: string | undefined;
     let fileBuffer: Buffer | undefined;
     let mimeType: string | undefined;
+    let crawlSite = false;
+    let maxPages = 5;
 
     if (mode === "url") {
       type = "url";
       sourceUrl = String(formData.get("url") || "").trim();
+      crawlSite = String(formData.get("crawlSite") || "") === "true";
+      maxPages = Number(formData.get("maxPages") || 5);
       if (!sourceUrl) throw new Error("A URL is required.");
       if (!name) {
         try {
@@ -83,11 +87,12 @@ export async function POST(request: Request) {
       throw new Error("Choose a resource type.");
     }
 
-    db.prepare(
+    await query(
       `INSERT INTO resources
        (id, name, type, source_url, file_name, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'processing', ?, ?)`,
-    ).run(resourceId, name, type, sourceUrl || null, fileName || null, now, now);
+       VALUES ($1, $2, $3, $4, $5, 'processing', $6, $7)`,
+      [resourceId, name, type, sourceUrl || null, fileName || null, now, now],
+    );
 
     try {
       await ingestResource({
@@ -99,20 +104,24 @@ export async function POST(request: Request) {
         content,
         fileBuffer,
         mimeType,
+        crawlSite,
+        maxPages,
       });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Resource processing failed.";
-      db.prepare(
+      await query(
         `UPDATE resources
-         SET status = 'failed', error = ?, updated_at = ?
-         WHERE id = ?`,
-      ).run(message, new Date().toISOString(), resourceId);
+         SET status = 'failed', error = $1, updated_at = $2
+         WHERE id = $3`,
+        [message, new Date(), resourceId],
+      );
       throw error;
     }
 
+    const resources = await listResources();
     return NextResponse.json(
-      { resource: listResources().find((resource) => resource.id === resourceId) },
+      { resource: resources.find((resource) => resource.id === resourceId) },
       { status: 201 },
     );
   } catch (error) {

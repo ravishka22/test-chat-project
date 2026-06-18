@@ -1,54 +1,111 @@
-import Database from "better-sqlite3";
-import fs from "node:fs";
-import path from "node:path";
+import { Pool, type QueryResultRow } from "pg";
 import type { Resource, ResourceStatus, ResourceType } from "@/lib/types";
 
+const DEFAULT_EMBEDDING_DIMENSIONS = 1024;
+
 const globalForDb = globalThis as unknown as {
-  knowledgeDb?: Database.Database;
+  knowledgePool?: Pool;
+  schemaReady?: Promise<void>;
 };
 
-function createDatabase() {
-  const databasePath = path.join(process.cwd(), "data", "knowledge.db");
-  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-
-  const database = new Database(databasePath);
-  database.pragma("journal_mode = WAL");
-  database.pragma("foreign_keys = ON");
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS resources (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      type TEXT NOT NULL,
-      source_url TEXT,
-      file_name TEXT,
-      content TEXT NOT NULL DEFAULT '',
-      status TEXT NOT NULL DEFAULT 'processing',
-      error TEXT,
-      chunk_count INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS chunks (
-      id TEXT PRIMARY KEY,
-      resource_id TEXT NOT NULL,
-      chunk_index INTEGER NOT NULL,
-      content TEXT NOT NULL,
-      embedding TEXT NOT NULL,
-      FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_chunks_resource_id
-      ON chunks(resource_id);
-  `);
-
-  return database;
+export function embeddingDimensions() {
+  const configured = Number(process.env.EMBEDDING_DIMENSIONS || 0);
+  if (Number.isInteger(configured) && configured > 0 && configured <= 4096) {
+    return configured;
+  }
+  return DEFAULT_EMBEDDING_DIMENSIONS;
 }
 
-export const db = globalForDb.knowledgeDb || createDatabase();
+function getPool() {
+  if (globalForDb.knowledgePool) return globalForDb.knowledgePool;
 
-if (process.env.NODE_ENV !== "production") {
-  globalForDb.knowledgeDb = db;
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error(
+      "PostgreSQL is not configured. Add DATABASE_URL to your environment.",
+    );
+  }
+
+  const pool = new Pool({
+    connectionString,
+    ssl:
+      process.env.DATABASE_SSL === "true"
+        ? { rejectUnauthorized: false }
+        : undefined,
+  });
+
+  if (process.env.NODE_ENV !== "production") {
+    globalForDb.knowledgePool = pool;
+  }
+
+  return pool;
+}
+
+export async function ensureSchema() {
+  if (globalForDb.schemaReady) return globalForDb.schemaReady;
+
+  const dimensions = embeddingDimensions();
+  globalForDb.schemaReady = (async () => {
+    const pool = getPool();
+    await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS resources (
+        id UUID PRIMARY KEY,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        source_url TEXT,
+        file_name TEXT,
+        content TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'processing',
+        error TEXT,
+        chunk_count INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS chunks (
+        id UUID PRIMARY KEY,
+        resource_id UUID NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        embedding vector(${dimensions}) NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_chunks_resource_id
+        ON chunks(resource_id);
+
+      CREATE INDEX IF NOT EXISTS idx_resources_status
+        ON resources(status);
+    `);
+  })();
+
+  return globalForDb.schemaReady;
+}
+
+export async function query<T extends QueryResultRow = QueryResultRow>(
+  text: string,
+  params: unknown[] = [],
+) {
+  await ensureSchema();
+  return getPool().query<T>(text, params);
+}
+
+export async function transaction<T>(
+  callback: (client: Pick<Pool, "query">) => Promise<T>,
+) {
+  await ensureSchema();
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const result = await callback(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 type ResourceRow = {
@@ -60,9 +117,13 @@ type ResourceRow = {
   status: ResourceStatus;
   error: string | null;
   chunk_count: number;
-  created_at: string;
-  updated_at: string;
+  created_at: Date | string;
+  updated_at: Date | string;
 };
+
+function asIso(value: Date | string) {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
 
 export function mapResource(row: ResourceRow): Resource {
   return {
@@ -74,20 +135,29 @@ export function mapResource(row: ResourceRow): Resource {
     status: row.status,
     error: row.error,
     chunkCount: row.chunk_count,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: asIso(row.created_at),
+    updatedAt: asIso(row.updated_at),
   };
 }
 
-export function listResources(): Resource[] {
-  const rows = db
-    .prepare(
-      `SELECT id, name, type, source_url, file_name, status, error,
-              chunk_count, created_at, updated_at
-       FROM resources
-       ORDER BY created_at DESC`,
-    )
-    .all() as ResourceRow[];
+export async function listResources(): Promise<Resource[]> {
+  const result = await query<ResourceRow>(
+    `SELECT id, name, type, source_url, file_name, status, error,
+            chunk_count, created_at, updated_at
+     FROM resources
+     ORDER BY created_at DESC`,
+  );
 
-  return rows.map(mapResource);
+  return result.rows.map(mapResource);
+}
+
+export async function getReadyResourceCount() {
+  const result = await query<{ count: string }>(
+    "SELECT COUNT(*) AS count FROM resources WHERE status = 'ready'",
+  );
+  return Number(result.rows[0]?.count || 0);
+}
+
+export function vectorLiteral(values: number[]) {
+  return `[${values.map((value) => Number(value).toFixed(8)).join(",")}]`;
 }

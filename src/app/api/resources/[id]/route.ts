@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { isAdminAuthenticated } from "@/lib/auth";
-import { db } from "@/lib/db";
+import { query } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -13,8 +13,8 @@ export async function DELETE(
   }
 
   const { id } = await params;
-  const result = db.prepare("DELETE FROM resources WHERE id = ?").run(id);
-  if (!result.changes) {
+  const result = await query("DELETE FROM resources WHERE id = $1", [id]);
+  if (!result.rowCount) {
     return NextResponse.json({ error: "Resource not found." }, { status: 404 });
   }
 

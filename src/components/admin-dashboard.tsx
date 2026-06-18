@@ -49,6 +49,8 @@ export function AdminDashboard() {
   const [mode, setMode] = useState<AddMode>("url");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
+  const [crawlSite, setCrawlSite] = useState(false);
+  const [maxPages, setMaxPages] = useState(5);
   const [content, setContent] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [search, setSearch] = useState("");
@@ -122,6 +124,8 @@ export function AdminDashboard() {
     formData.set("mode", mode);
     formData.set("name", name);
     if (mode === "url") formData.set("url", url);
+    if (mode === "url") formData.set("crawlSite", String(crawlSite));
+    if (mode === "url") formData.set("maxPages", String(maxPages));
     if (mode === "text") formData.set("content", content);
     if (mode === "file" && file) formData.set("file", file);
 
@@ -139,6 +143,8 @@ export function AdminDashboard() {
       setSuccess(`${data.resource?.name || "Resource"} is ready to search.`);
       setName("");
       setUrl("");
+      setCrawlSite(false);
+      setMaxPages(5);
       setContent("");
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -315,8 +321,33 @@ export function AdminDashboard() {
                   />
                 </div>
                 <small>
-                  Atlas extracts the readable page content and indexes it.
+                  Atlas can index one page or crawl linked pages on the same
+                  site.
                 </small>
+                <div className="crawl-options">
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={crawlSite}
+                      onChange={(event) => setCrawlSite(event.target.checked)}
+                    />
+                    <span>Crawl linked pages on this site</span>
+                  </label>
+                  {crawlSite && (
+                    <label className="mini-field">
+                      Max pages
+                      <input
+                        type="number"
+                        min={1}
+                        max={25}
+                        value={maxPages}
+                        onChange={(event) =>
+                          setMaxPages(Number(event.target.value))
+                        }
+                      />
+                    </label>
+                  )}
+                </div>
               </div>
             )}
 
