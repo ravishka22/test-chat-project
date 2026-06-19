@@ -20,14 +20,21 @@ import type { ChatMessage, Source } from "@/lib/types";
 
 const welcomeMessage: ChatMessage = {
   role: "assistant",
+  title: "Welcome to AES. How can I guide you today?",
   content:
     "Hi, I’m **Atlas**. Ask me anything about the information in this knowledge base. I’ll answer from the available sources and show you where each answer came from.",
+  suggestions: [
+    "Show me universities in Georgia",
+    "Help me choose a program",
+    "Tell me about SEU",
+    "Compare universities",
+  ],
 };
 
 const suggestions = [
-  "Give me a quick overview of the knowledge base.",
-  "What are the most important policies I should know?",
-  "Summarize the key points across the available resources.",
+  "Show me universities in Georgia",
+  "Help me choose a program",
+  "Tell me about SEU",
 ];
 
 function SourceIcon({ type }: { type: Source["type"] }) {
@@ -80,6 +87,22 @@ function SourceList({ sources }: { sources: Source[] }) {
   );
 }
 
+function latestAssistantMessage(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "assistant") return messages[index];
+  }
+
+  return welcomeMessage;
+}
+
+function latestUserQuestion(messages: ChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") return messages[index].content;
+  }
+
+  return "";
+}
+
 export function ChatShell() {
   const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage]);
   const [input, setInput] = useState("");
@@ -122,7 +145,10 @@ export function ChatShell() {
         }),
       });
       const data = (await response.json()) as {
+        title?: string;
+        body?: string;
         answer?: string;
+        suggestions?: string[];
         sources?: Source[];
         error?: string;
       };
@@ -132,7 +158,9 @@ export function ChatShell() {
         ...current,
         {
           role: "assistant",
-          content: data.answer || "I could not produce an answer.",
+          title: data.title || "Here is what AES found for you",
+          content: data.body || data.answer || "I could not produce an answer.",
+          suggestions: data.suggestions || [],
           sources: data.sources || [],
         },
       ]);
@@ -141,10 +169,16 @@ export function ChatShell() {
         ...current,
         {
           role: "assistant",
+          title: "Sorry, I could not complete that request",
           content:
             error instanceof Error
               ? error.message
               : "Something went wrong. Please try again.",
+          suggestions: [
+            "Try asking again",
+            "Ask about programs",
+            "Ask about universities",
+          ],
         },
       ]);
     } finally {
@@ -156,6 +190,17 @@ export function ChatShell() {
     event.preventDefault();
     void askQuestion(input);
   }
+
+  const activeAnswer = latestAssistantMessage(messages);
+  const activeQuestion = latestUserQuestion(messages);
+  const activeTitle =
+    activeAnswer.title ||
+    (activeQuestion ? "Here is what AES found for you" : "Welcome to AES");
+  const activeBody =
+    activeAnswer === welcomeMessage
+      ? "Ask me about programs, universities, admissions, fees, scholarships, or studying in Georgia through Academy of European Studies."
+      : activeAnswer.content;
+  const activeSuggestions = activeAnswer.suggestions || [];
 
   return (
     <div className="chat-app">
@@ -236,40 +281,52 @@ export function ChatShell() {
         </header>
 
         <section className="conversation">
-          <div className="message-stack">
-            {messages.map((message, index) => (
-              <article
-                className={`message-row ${message.role}`}
-                key={`${message.role}-${index}`}
-              >
-                {message.role === "assistant" && (
-                  <span className="assistant-avatar" aria-hidden="true">
-                    <Sparkles size={17} />
-                  </span>
-                )}
-                <div className="message-content">
-                  {message.role === "assistant" ? (
-                    <Markdown>{message.content}</Markdown>
-                  ) : (
-                    <p>{message.content}</p>
-                  )}
-                  {message.sources && <SourceList sources={message.sources} />}
-                </div>
-              </article>
-            ))}
+          <div className="response-stage">
+            <section className="aes-response" aria-live="polite">
+              <span className="eyebrow">
+                {activeQuestion ? "AES coordinator" : "Academy of European Studies"}
+              </span>
+              <h1>
+                {loading ? "Great, let me check that for you..." : activeTitle}
+              </h1>
 
-            {loading && (
-              <article className="message-row assistant">
-                <span className="assistant-avatar" aria-hidden="true">
-                  <Sparkles size={17} />
-                </span>
-                <div className="thinking">
-                  <span />
-                  <span />
-                  <span />
-                  Searching the knowledge base
+              <div className="aes-response-body">
+                {loading ? (
+                  <div className="thinking">
+                    <span />
+                    <span />
+                    <span />
+                    Preparing a helpful answer
+                  </div>
+                ) : (
+                  <Markdown>{activeBody}</Markdown>
+                )}
+              </div>
+
+              {!loading && activeSuggestions.length > 0 && (
+                <div className="answer-suggestion-list">
+                  {activeSuggestions.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      onClick={() => void askQuestion(suggestion)}
+                      disabled={loading}
+                      type="button"
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
                 </div>
-              </article>
+              )}
+
+              <p className="ask-anything-line">
+                Or, ask anything about AES universities or programs...
+              </p>
+            </section>
+
+            {!loading && activeAnswer.sources && activeAnswer.sources.length > 0 && (
+              <aside className="response-sources">
+                <SourceList sources={activeAnswer.sources} />
+              </aside>
             )}
             <div ref={bottomRef} />
           </div>

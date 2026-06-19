@@ -339,7 +339,7 @@ export function AdminDashboard() {
                       <input
                         type="number"
                         min={1}
-                        max={25}
+                        max={100}
                         value={maxPages}
                         onChange={(event) =>
                           setMaxPages(Number(event.target.value))

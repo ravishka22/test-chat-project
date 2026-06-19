@@ -37,5 +37,7 @@ export interface Source {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  title?: string;
+  suggestions?: string[];
   sources?: Source[];
 }

@@ -5,6 +5,12 @@ type ChatMessage = {
   content: string;
 };
 
+export type CoordinatorAnswer = {
+  title: string;
+  body: string;
+  suggestions: string[];
+};
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -43,6 +49,24 @@ function ollamaBaseUrl() {
   );
 }
 
+function ollamaBaseUrlFallback(baseUrl: string) {
+  try {
+    const url = new URL(baseUrl);
+    if (url.hostname === "localhost") {
+      url.hostname = "127.0.0.1";
+      return url.toString().replace(/\/$/, "");
+    }
+    if (url.hostname === "127.0.0.1") {
+      url.hostname = "localhost";
+      return url.toString().replace(/\/$/, "");
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 function embeddingModel() {
   return process.env.EMBEDDING_MODEL || "qwen3-embedding:0.6b";
 }
@@ -52,14 +76,31 @@ function queryInstruction(query: string) {
 }
 
 async function callOllamaEmbed(input: string | string[]) {
-  const response = await fetch(`${ollamaBaseUrl()}/api/embed`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: embeddingModel(),
-      input,
-    }),
-  });
+  const baseUrl = ollamaBaseUrl();
+  const fallbackBaseUrl = ollamaBaseUrlFallback(baseUrl);
+  const model = embeddingModel();
+  let response: Response;
+
+  try {
+    response = await fetchOllamaEmbedding(baseUrl, model, input);
+  } catch (error) {
+    if (fallbackBaseUrl) {
+      try {
+        response = await fetchOllamaEmbedding(fallbackBaseUrl, model, input);
+      } catch (fallbackError) {
+        const detail =
+          fallbackError instanceof Error ? ` ${fallbackError.message}` : "";
+        throw new Error(
+          `Could not reach Ollama at ${baseUrl} or ${fallbackBaseUrl}. Start Ollama and make sure the ${model} model is installed.${detail}`,
+        );
+      }
+    } else {
+      const detail = error instanceof Error ? ` ${error.message}` : "";
+      throw new Error(
+        `Could not reach Ollama at ${baseUrl}. Start Ollama and make sure the ${model} model is installed.${detail}`,
+      );
+    }
+  }
 
   const data = (await response.json().catch(() => null)) as
     | { embeddings?: number[][]; error?: string }
@@ -73,10 +114,28 @@ async function callOllamaEmbed(input: string | string[]) {
   }
 
   if (!data?.embeddings?.length) {
-    throw new Error("Ollama returned an empty embedding.");
+    throw new Error(
+      `Ollama returned an empty embedding for ${model}. Make sure the model supports /api/embed.`,
+    );
   }
 
   return data.embeddings;
+}
+
+async function fetchOllamaEmbedding(
+  baseUrl: string,
+  model: string,
+  input: string | string[],
+) {
+  return fetch(`${baseUrl}/api/embed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(60_000),
+    body: JSON.stringify({
+      model,
+      input,
+    }),
+  });
 }
 
 export async function embedDocuments(
@@ -171,6 +230,50 @@ async function callOpenAiCompatibleChat(messages: ChatMessage[]) {
   return content;
 }
 
+function parseCoordinatorAnswer(content: string): CoordinatorAnswer {
+  const cleaned = content
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "");
+
+  try {
+    const parsed = JSON.parse(cleaned) as Partial<CoordinatorAnswer>;
+    const title = parsed.title?.trim();
+    const body = parsed.body?.trim();
+    if (title && body) {
+      return {
+        title,
+        body,
+        suggestions: Array.isArray(parsed.suggestions)
+          ? parsed.suggestions
+              .filter((suggestion): suggestion is string => typeof suggestion === "string")
+              .map((suggestion) => suggestion.trim())
+              .filter(Boolean)
+              .slice(0, 4)
+          : [],
+      };
+    }
+  } catch {
+    // Fall through to a resilient Markdown/text fallback.
+  }
+
+  const headingMatch = cleaned.match(/^\s{0,3}#{1,3}\s+(.+?)\s*#*\s*(?:\n|$)/);
+  if (headingMatch) {
+    const body = cleaned.slice(headingMatch[0].length).trim();
+    return {
+      title: headingMatch[1].trim(),
+      body: body || cleaned,
+      suggestions: [],
+    };
+  }
+
+  return {
+    title: "Here is what AES found for you",
+    body: cleaned,
+    suggestions: [],
+  };
+}
+
 export async function generateGroundedAnswer({
   question,
   history,
@@ -180,15 +283,20 @@ export async function generateGroundedAnswer({
   history: string;
   context: string;
 }) {
-  return callOpenAiCompatibleChat([
+  const content = await callOpenAiCompatibleChat([
     {
       role: "system",
-      content: `You are Atlas, a precise knowledge base assistant.
-Answer using only the supplied knowledge base excerpts.
+      content: `You are an education coordinator from Academy of European Studies (AES), a Sri Lankan and UAE partner education agency for four main universities in Georgia: SEU, IBSU, ABMU, and East West.
+Speak warmly, naturally, and helpfully, like a real coordinator guiding a student or parent.
+Answer using only the supplied knowledge base excerpts for program, university, fee, admission, timeline, visa, and policy details.
 When a claim comes from an excerpt, cite it with its bracketed number, for example [1].
-If the excerpts do not contain enough information, say that clearly and suggest what information is missing.
-Do not invent policies, facts, links, citations, or hidden reasoning.
-Use concise Markdown and a helpful, professional tone.`,
+If the excerpts do not contain the exact requested detail, say that AES does not have that exact detail in the current knowledge base, briefly share any related details that are available from the excerpts, and ask one or two focused follow-up questions to help guide the student using those related details.
+Do not invent program facts, fees, policies, links, citations, or hidden reasoning.
+Return only valid JSON with this exact shape:
+{"title":"A warm title sentence for the large heading","body":"One friendly paragraph with the useful answer and citations where needed","suggestions":["short follow-up option 1","short follow-up option 2"]}
+The title should sound human, for example: "Great choice. Here you have more details about Georgian National University SEU!"
+The body should be concise and can use Markdown citations like [1], but it should read as a paragraph rather than a long report.
+Suggestions should be simple button labels based on available related knowledge. Use 0 to 4 suggestions.`,
     },
     {
       role: "user",
@@ -202,4 +310,6 @@ CURRENT QUESTION
 ${question}`,
     },
   ]);
+
+  return parseCoordinatorAnswer(content);
 }

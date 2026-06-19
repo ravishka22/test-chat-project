@@ -58,8 +58,12 @@ export async function POST(request: Request) {
 
     if (!readyCount) {
       return NextResponse.json({
+        title: "The knowledge base is not ready yet",
+        body:
+          "The knowledge base is empty. An administrator needs to add at least one resource before I can answer questions.",
         answer:
           "The knowledge base is empty. An administrator needs to add at least one resource before I can answer questions.",
+        suggestions: ["Add university details", "Add program details"],
         sources: [],
       });
     }
@@ -95,7 +99,13 @@ export async function POST(request: Request) {
       score: chunk.score,
     }));
 
-    return NextResponse.json({ answer, sources });
+    return NextResponse.json({
+      title: answer.title,
+      body: answer.body,
+      answer: `## ${answer.title}\n\n${answer.body}`,
+      suggestions: answer.suggestions,
+      sources,
+    });
   } catch (error) {
     console.error(error);
     const message =

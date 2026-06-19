@@ -13,6 +13,12 @@ const MAX_URL_BYTES = 10 * 1024 * 1024;
 const MAX_REDIRECTS = 10;
 const MAX_CRAWL_PAGES = 25;
 
+type CheerioSelector = (selector: string) => {
+  attr(name: string): string | undefined;
+  first(): { text(): string };
+  text(): string;
+};
+
 export interface IngestInput {
   id: string;
   name: string;
@@ -34,6 +40,39 @@ function validateExtractedText(text: string) {
   return normalized;
 }
 
+function decodeResponseBody(buffer: Buffer, contentType: string) {
+  const charset = contentType.match(/charset=([^;]+)/i)?.[1]?.trim();
+  try {
+    return new TextDecoder(charset || "utf-8").decode(buffer);
+  } catch {
+    return buffer.toString("utf8");
+  }
+}
+
+function filenameTitle(url: URL) {
+  const lastSegment = url.pathname.split("/").filter(Boolean).pop();
+  if (!lastSegment) return url.hostname;
+  return decodeURIComponent(lastSegment).replace(/\.[^.]+$/, "") || url.hostname;
+}
+
+function bestReadableText($: CheerioSelector) {
+  return [
+    $("article").first().text(),
+    $("main").first().text(),
+    $('[role="main"]').first().text(),
+    $("#content").first().text(),
+    $(".content").first().text(),
+    $(".post-content").first().text(),
+    $(".entry-content").first().text(),
+    $("body").text(),
+    $('meta[name="description"]').attr("content") || "",
+    $('meta[property="og:description"]').attr("content") || "",
+  ]
+    .map(normalizeText)
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)[0] || "";
+}
+
 function extractReadableText(html: string, fallbackTitle: string) {
   const $ = cheerio.load(html);
   $("script, style, nav, footer, header, form, svg, noscript, iframe").remove();
@@ -42,10 +81,8 @@ function extractReadableText(html: string, fallbackTitle: string) {
     $('meta[property="og:title"]').attr("content")?.trim() ||
     $("title").first().text().trim() ||
     fallbackTitle;
-  const text =
-    $("article").first().text() || $("main").first().text() || $("body").text();
 
-  return { title, text: validateExtractedText(text) };
+  return { title, text: validateExtractedText(bestReadableText($)) };
 }
 
 async function fetchPublicPage(rawUrl: string) {
@@ -85,10 +122,33 @@ async function fetchPublicPage(rawUrl: string) {
     }
 
     const contentType = response.headers.get("content-type") || "";
-    const body = buffer.toString("utf8");
-    if (contentType.includes("text/plain")) {
+    const lowerContentType = contentType.toLowerCase();
+
+    if (
+      lowerContentType.includes("application/pdf") ||
+      currentUrl.pathname.toLowerCase().endsWith(".pdf")
+    ) {
+      const result = await pdfParse(buffer);
       return {
-        title: currentUrl.hostname,
+        title: filenameTitle(currentUrl),
+        text: validateExtractedText(result.text.replace(/\0/g, "")),
+        finalUrl: currentUrl.toString(),
+      };
+    }
+
+    if (
+      contentType &&
+      !lowerContentType.includes("text/html") &&
+      !lowerContentType.includes("text/plain") &&
+      !lowerContentType.includes("application/xhtml+xml")
+    ) {
+      throw new Error("The URL did not point to readable HTML, text, or PDF content.");
+    }
+
+    const body = decodeResponseBody(buffer, contentType);
+    if (lowerContentType.includes("text/plain")) {
+      return {
+        title: filenameTitle(currentUrl),
         text: validateExtractedText(body),
         finalUrl: currentUrl.toString(),
       };
@@ -134,9 +194,7 @@ async function crawlPublicSite(rawUrl: string, maxPages: number) {
         $('meta[property="og:title"]').attr("content")?.trim() ||
         $("title").first().text().trim() ||
         url.hostname;
-      const text = normalizeText(
-        $("article").first().text() || $("main").first().text() || $("body").text(),
-      );
+      const text = bestReadableText($);
 
       if (text.length >= 20) {
         pages.push({ url: url.toString(), title, text });
@@ -186,7 +244,7 @@ async function extractFileText(input: IngestInput) {
 
   if (input.type === "pdf") {
     const result = await pdfParse(input.fileBuffer);
-    return validateExtractedText(result.text);
+    return validateExtractedText(result.text.replace(/\0/g, ""));
   }
 
   if (input.type === "docx") {
