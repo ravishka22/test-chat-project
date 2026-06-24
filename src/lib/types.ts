@@ -1,5 +1,6 @@
 export type ResourceType = "url" | "pdf" | "docx" | "text";
 export type ResourceStatus = "processing" | "ready" | "failed";
+export type CrawlStatus = "idle" | "crawling" | "failed";
 
 export interface Resource {
   id: string;
@@ -10,6 +11,15 @@ export interface Resource {
   status: ResourceStatus;
   error: string | null;
   chunkCount: number;
+  pageCount: number;
+  crawlSite: boolean;
+  maxPages: number;
+  crawlStatus: CrawlStatus;
+  crawlError: string | null;
+  crawlIntervalMinutes: number | null;
+  lastCrawledAt: string | null;
+  nextCrawlAt: string | null;
+  lastContentChangeAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

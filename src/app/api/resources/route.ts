@@ -5,7 +5,7 @@ import { ingestResource } from "@/lib/ingest";
 import type { ResourceType } from "@/lib/types";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 async function unauthorized() {
   return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
@@ -51,12 +51,20 @@ export async function POST(request: Request) {
     let mimeType: string | undefined;
     let crawlSite = false;
     let maxPages = 5;
+    let crawlIntervalMinutes: number | null = null;
 
     if (mode === "url") {
       type = "url";
       sourceUrl = String(formData.get("url") || "").trim();
       crawlSite = String(formData.get("crawlSite") || "") === "true";
       maxPages = Number(formData.get("maxPages") || 5);
+      const requestedInterval = Number(
+        formData.get("crawlIntervalMinutes") || 0,
+      );
+      crawlIntervalMinutes =
+        Number.isInteger(requestedInterval) && requestedInterval >= 15
+          ? Math.min(requestedInterval, 43_200)
+          : null;
       if (!sourceUrl) throw new Error("A URL is required.");
       if (!name) {
         try {
@@ -89,9 +97,24 @@ export async function POST(request: Request) {
 
     await query(
       `INSERT INTO resources
-       (id, name, type, source_url, file_name, status, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, 'processing', $6, $7)`,
-      [resourceId, name, type, sourceUrl || null, fileName || null, now, now],
+       (id, name, type, source_url, file_name, status, crawl_site, max_pages,
+        crawl_interval_minutes, next_crawl_at, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 'processing', $6, $7, $8,
+         CASE WHEN $8::integer IS NULL THEN NULL
+              ELSE $9::timestamptz + $8::integer * INTERVAL '1 minute' END,
+         $9, $10)`,
+      [
+        resourceId,
+        name,
+        type,
+        sourceUrl || null,
+        fileName || null,
+        crawlSite,
+        crawlSite ? Math.max(1, Math.min(maxPages || 5, 1000)) : 1,
+        crawlIntervalMinutes,
+        now,
+        now,
+      ],
     );
 
     try {
@@ -112,7 +135,16 @@ export async function POST(request: Request) {
         error instanceof Error ? error.message : "Resource processing failed.";
       await query(
         `UPDATE resources
-         SET status = 'failed', error = $1, updated_at = $2
+         SET status = 'failed', error = $1, crawl_status = 'failed',
+             crawl_error = $1, last_crawled_at = CASE
+               WHEN type = 'url' THEN $2
+               ELSE last_crawled_at
+             END,
+             next_crawl_at = CASE
+               WHEN crawl_interval_minutes IS NULL THEN NULL
+               ELSE $2 + crawl_interval_minutes * INTERVAL '1 minute'
+             END,
+             updated_at = $2
          WHERE id = $3`,
         [message, new Date(), resourceId],
       );

@@ -29,6 +29,7 @@ Your selected models are reasonable defaults:
 
 - Grounded chat with numbered source citations
 - URL, bounded same-site crawl, PDF, DOCX, TXT, Markdown, and manual-text ingestion
+- Page counts, manual recrawling, scheduled update checks, and change detection
 - PostgreSQL + pgvector similarity search
 - Ollama embedding support with Qwen3 defaults
 - OpenRouter/OpenAI-compatible chat completion support
@@ -91,4 +92,10 @@ strict grounded-answer prompt.
 
 For crawling, Atlas uses Crawlee in bounded same-site mode. Admins can index a
 single URL or crawl linked pages from the same origin up to a configurable page
-limit.
+limit. URL resources can be checked automatically on a dashboard-defined
+schedule. Atlas fingerprints the extracted content and only rebuilds embeddings
+when the website content changes.
+
+The Node.js server runs the local crawl scheduler once per minute. For serverless
+deployments, configure a cron service to send `POST /api/crawl/run` with
+`Authorization: Bearer <CRAWL_CRON_SECRET>`.

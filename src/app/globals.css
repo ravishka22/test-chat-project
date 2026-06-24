@@ -998,7 +998,7 @@ a {
 
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   margin: 33px 0 20px;
 }
@@ -1035,6 +1035,11 @@ a {
 .stat-icon.gold {
   color: #a07020;
   background: var(--gold-soft);
+}
+
+.stat-icon.blue {
+  color: #356d83;
+  background: #e6f0f3;
 }
 
 .stat-card > div {
@@ -1169,6 +1174,11 @@ a {
 .mini-field input {
   width: 66px;
   padding: 7px 8px;
+}
+
+.mini-field select {
+  min-width: 118px;
+  padding: 7px 26px 7px 8px;
 }
 
 .field textarea {
@@ -1318,7 +1328,9 @@ a {
 
 .resource-row {
   display: grid;
-  grid-template-columns: 39px minmax(150px, 1.5fr) 55px 96px minmax(90px, 0.8fr) 90px 32px;
+  grid-template-columns:
+    39px minmax(190px, 1.5fr) 55px 100px minmax(115px, 0.8fr)
+    155px 70px;
   align-items: center;
   gap: 12px;
   padding: 14px 2px;
@@ -1375,6 +1387,11 @@ a {
   white-space: nowrap;
 }
 
+.resource-info .resource-crawl-summary {
+  color: #6e6970;
+  font-size: 8px;
+}
+
 .resource-kind {
   color: var(--soft-muted);
   font-size: 8px;
@@ -1416,6 +1433,41 @@ a {
   font-size: 9px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.resource-schedule {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--soft-muted);
+}
+
+.resource-crawl-controls {
+  display: grid;
+  gap: 5px;
+}
+
+.resource-schedule select {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 24px 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background-color: white;
+  font-size: 9px;
+}
+
+.resource-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.icon-button.compact {
+  width: 30px;
+  height: 30px;
 }
 
 .delete-button {
@@ -1533,12 +1585,16 @@ a {
   }
 
   .resource-row {
-    grid-template-columns: 39px minmax(130px, 1fr) 80px 75px 32px;
+    grid-template-columns: 39px minmax(150px, 1fr) 90px 135px 70px;
   }
 
   .resource-kind,
   .resource-meta {
     display: none;
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1674,13 +1730,14 @@ a {
   }
 
   .resource-row {
-    grid-template-columns: 37px minmax(120px, 1fr) 74px 30px;
+    grid-template-columns: 37px minmax(120px, 1fr) 78px 62px;
     gap: 9px;
   }
 
   .resource-kind,
   .resource-meta,
-  .resource-date {
+  .resource-date,
+  .resource-crawl-controls {
     display: none;
   }
 

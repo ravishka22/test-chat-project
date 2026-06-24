@@ -6,6 +6,7 @@ import Link from "next/link";
 import {
   ArrowLeft,
   BookOpen,
+  CalendarClock,
   CheckCircle2,
   File,
   FileText,
@@ -16,6 +17,7 @@ import {
   LogOut,
   Plus,
   RefreshCw,
+  RotateCw,
   Search,
   Trash2,
   Type,
@@ -35,6 +37,16 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
+function formatDateTime(value: string | null) {
+  if (!value) return "Not checked yet";
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
 function ResourceIcon({ type }: { type: ResourceType }) {
   if (type === "url") return <Globe2 size={19} />;
   if (type === "pdf") return <FileText size={19} />;
@@ -51,12 +63,16 @@ export function AdminDashboard() {
   const [url, setUrl] = useState("");
   const [crawlSite, setCrawlSite] = useState(false);
   const [maxPages, setMaxPages] = useState(5);
+  const [autoCrawl, setAutoCrawl] = useState(false);
+  const [crawlIntervalMinutes, setCrawlIntervalMinutes] = useState(1440);
   const [content, setContent] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [recrawlingId, setRecrawlingId] = useState<string | null>(null);
+  const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
@@ -107,6 +123,10 @@ export function AdminDashboard() {
     (total, resource) => total + resource.chunkCount,
     0,
   );
+  const totalPages = readyResources.reduce(
+    (total, resource) => total + resource.pageCount,
+    0,
+  );
 
   function changeMode(nextMode: AddMode) {
     setMode(nextMode);
@@ -126,6 +146,9 @@ export function AdminDashboard() {
     if (mode === "url") formData.set("url", url);
     if (mode === "url") formData.set("crawlSite", String(crawlSite));
     if (mode === "url") formData.set("maxPages", String(maxPages));
+    if (mode === "url" && autoCrawl) {
+      formData.set("crawlIntervalMinutes", String(crawlIntervalMinutes));
+    }
     if (mode === "text") formData.set("content", content);
     if (mode === "file" && file) formData.set("file", file);
 
@@ -145,6 +168,8 @@ export function AdminDashboard() {
       setUrl("");
       setCrawlSite(false);
       setMaxPages(5);
+      setAutoCrawl(false);
+      setCrawlIntervalMinutes(1440);
       setContent("");
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -156,6 +181,86 @@ export function AdminDashboard() {
       await loadResources();
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function recrawl(resource: Resource) {
+    setRecrawlingId(resource.id);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch(`/api/resources/${resource.id}/crawl`, {
+        method: "POST",
+      });
+      const data = (await response.json()) as {
+        resource?: Resource;
+        changed?: boolean;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(data.error || "Website crawl failed.");
+      setSuccess(
+        data.changed
+          ? `${resource.name} changed and its knowledge was updated.`
+          : `${resource.name} was checked. No content changes were found.`,
+      );
+      await loadResources();
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Website crawl failed.",
+      );
+      await loadResources();
+    } finally {
+      setRecrawlingId(null);
+    }
+  }
+
+  async function saveCrawlSettings(
+    resource: Resource,
+    settings: {
+      crawlIntervalMinutes?: number | null;
+      crawlSite?: boolean;
+      maxPages?: number;
+    },
+  ) {
+    const crawlInterval =
+      settings.crawlIntervalMinutes === undefined
+        ? resource.crawlIntervalMinutes
+        : settings.crawlIntervalMinutes;
+    const crawlSite = settings.crawlSite ?? resource.crawlSite;
+    const savedMaxPages = settings.maxPages ?? resource.maxPages;
+    setSavingId(resource.id);
+    setError("");
+    try {
+      const response = await fetch(`/api/resources/${resource.id}/crawl`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          crawlSite,
+          maxPages: savedMaxPages,
+          crawlIntervalMinutes: crawlInterval,
+        }),
+      });
+      const data = (await response.json()) as {
+        resource?: Resource;
+        error?: string;
+      };
+      if (!response.ok || !data.resource) {
+        throw new Error(data.error || "Could not update crawl schedule.");
+      }
+      setResources((current) =>
+        current.map((item) =>
+          item.id === resource.id ? data.resource! : item,
+        ),
+      );
+      setSuccess(`${resource.name} crawl settings were updated.`);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Could not update crawl schedule.",
+      );
+    } finally {
+      setSavingId(null);
     }
   }
 
@@ -254,6 +359,15 @@ export function AdminDashboard() {
               <span>Indexed passages</span>
             </div>
           </article>
+          <article className="stat-card">
+            <span className="stat-icon blue">
+              <Globe2 size={20} />
+            </span>
+            <div>
+              <strong>{totalPages}</strong>
+              <span>Web pages crawled</span>
+            </div>
+          </article>
         </section>
 
         <section className="admin-panel add-resource-panel" id="add-resource">
@@ -339,12 +453,41 @@ export function AdminDashboard() {
                       <input
                         type="number"
                         min={1}
-                        max={100}
+                        max={1000}
                         value={maxPages}
                         onChange={(event) =>
                           setMaxPages(Number(event.target.value))
                         }
                       />
+                    </label>
+                  )}
+                </div>
+                <div className="crawl-options">
+                  <label className="toggle-row">
+                    <input
+                      type="checkbox"
+                      checked={autoCrawl}
+                      onChange={(event) => setAutoCrawl(event.target.checked)}
+                    />
+                    <span>Automatically check for website updates</span>
+                  </label>
+                  {autoCrawl && (
+                    <label className="mini-field">
+                      Frequency
+                      <select
+                        value={crawlIntervalMinutes}
+                        onChange={(event) =>
+                          setCrawlIntervalMinutes(Number(event.target.value))
+                        }
+                      >
+                        <option value={60}>Every hour</option>
+                        <option value={180}>Every 3 hours</option>
+                        <option value={360}>Every 6 hours</option>
+                        <option value={720}>Every 12 hours</option>
+                        <option value={1440}>Daily</option>
+                        <option value={4320}>Every 3 days</option>
+                        <option value={10080}>Weekly</option>
+                      </select>
                     </label>
                   )}
                 </div>
@@ -473,38 +616,173 @@ export function AdminDashboard() {
                     <span>
                       {resource.sourceUrl || resource.fileName || "Manual text"}
                     </span>
+                    {resource.type === "url" && (
+                      <>
+                        <span className="resource-crawl-summary">
+                          {resource.pageCount}{" "}
+                          {resource.pageCount === 1 ? "page" : "pages"} | Last
+                          checked {formatDateTime(resource.lastCrawledAt)}
+                        </span>
+                        <span
+                          className="resource-crawl-summary"
+                          title={
+                            resource.lastContentChangeAt
+                              ? `Last content change ${formatDateTime(
+                                  resource.lastContentChangeAt,
+                                )}`
+                              : "No content change has been recorded yet"
+                          }
+                        >
+                          Last content change{" "}
+                          {resource.lastContentChangeAt
+                            ? formatDateTime(resource.lastContentChangeAt)
+                            : "not recorded"}
+                        </span>
+                      </>
+                    )}
                   </div>
                   <span className="resource-kind">
                     {resource.type.toUpperCase()}
                   </span>
-                  <span className={`resource-status ${resource.status}`}>
-                    {resource.status === "ready" && <CheckCircle2 size={14} />}
+                  <span
+                    className={`resource-status ${
+                      resource.crawlStatus === "failed"
+                        ? "failed"
+                        : resource.status
+                    }`}
+                    title={resource.crawlError || undefined}
+                  >
+                    {resource.crawlStatus === "crawling" ? (
+                      <LoaderCircle className="spin" size={14} />
+                    ) : resource.status === "ready" ? (
+                      <CheckCircle2 size={14} />
+                    ) : null}
                     {resource.status === "processing" && (
                       <LoaderCircle className="spin" size={14} />
                     )}
                     {resource.status === "failed" && <XCircle size={14} />}
-                    {resource.status}
+                    {resource.crawlStatus === "crawling"
+                      ? "crawling"
+                      : resource.crawlStatus === "failed"
+                        ? "crawl failed"
+                        : resource.status}
                   </span>
                   <span className="resource-meta">
                     {resource.status === "ready"
-                      ? `${resource.chunkCount} passages`
+                      ? resource.type === "url"
+                        ? `${resource.chunkCount} passages | ${resource.pageCount} ${
+                            resource.pageCount === 1 ? "page" : "pages"
+                          }`
+                        : `${resource.chunkCount} passages`
                       : resource.error || "Processing"}
                   </span>
-                  <span className="resource-date">
-                    {formatDate(resource.createdAt)}
-                  </span>
-                  <button
-                    className="delete-button"
-                    onClick={() => void deleteResource(resource)}
-                    disabled={deletingId === resource.id}
-                    aria-label={`Delete ${resource.name}`}
-                  >
-                    {deletingId === resource.id ? (
-                      <LoaderCircle className="spin" size={17} />
-                    ) : (
-                      <Trash2 size={17} />
+                  {resource.type === "url" ? (
+                    <div className="resource-crawl-controls">
+                      <label
+                        className="resource-schedule"
+                        title={
+                          resource.nextCrawlAt
+                            ? `Next check ${formatDateTime(resource.nextCrawlAt)}`
+                            : "Automatic checks are off"
+                        }
+                      >
+                        <CalendarClock size={14} />
+                        <select
+                          value={resource.crawlIntervalMinutes || 0}
+                          onChange={(event) =>
+                            void saveCrawlSettings(resource, {
+                              crawlIntervalMinutes:
+                                Number(event.target.value) || null,
+                            })
+                          }
+                          disabled={savingId === resource.id}
+                          aria-label={`Crawl schedule for ${resource.name}`}
+                        >
+                          <option value={0}>Manual only</option>
+                          <option value={60}>Every hour</option>
+                          <option value={180}>Every 3 hours</option>
+                          <option value={360}>Every 6 hours</option>
+                          <option value={720}>Every 12 hours</option>
+                          <option value={1440}>Daily</option>
+                          <option value={4320}>Every 3 days</option>
+                          <option value={10080}>Weekly</option>
+                        </select>
+                      </label>
+                      <label className="resource-schedule" title="Crawl scope">
+                        <Globe2 size={14} />
+                        <select
+                          value={resource.crawlSite ? resource.maxPages : 1}
+                          onChange={(event) => {
+                            const limit = Number(event.target.value);
+                            void saveCrawlSettings(resource, {
+                              crawlSite: limit > 1,
+                              maxPages: limit,
+                            });
+                          }}
+                          disabled={savingId === resource.id}
+                          aria-label={`Crawl page limit for ${resource.name}`}
+                        >
+                          {resource.crawlSite &&
+                            ![10, 25, 50, 100, 250, 500, 1000].includes(
+                              resource.maxPages,
+                            ) && (
+                              <option value={resource.maxPages}>
+                                Up to {resource.maxPages} pages
+                              </option>
+                            )}
+                          <option value={1}>Single page</option>
+                          <option value={10}>Up to 10 pages</option>
+                          <option value={25}>Up to 25 pages</option>
+                          <option value={50}>Up to 50 pages</option>
+                          <option value={100}>Up to 100 pages</option>
+                          <option value={250}>Up to 250 pages</option>
+                          <option value={500}>Up to 500 pages</option>
+                          <option value={1000}>Up to 1,000 pages</option>
+                        </select>
+                      </label>
+                    </div>
+                  ) : (
+                    <span className="resource-date">
+                      {formatDate(resource.createdAt)}
+                    </span>
+                  )}
+                  <div className="resource-actions">
+                    {resource.type === "url" && (
+                      <button
+                        className="icon-button compact"
+                        onClick={() => void recrawl(resource)}
+                        disabled={
+                          recrawlingId === resource.id ||
+                          resource.crawlStatus === "crawling"
+                        }
+                        aria-label={`Crawl ${resource.name} now`}
+                        title="Crawl now"
+                      >
+                        <RotateCw
+                          size={16}
+                          className={
+                            recrawlingId === resource.id ||
+                            resource.crawlStatus === "crawling"
+                              ? "spin"
+                              : ""
+                          }
+                        />
+                      </button>
                     )}
-                  </button>
+                    <button
+                      className="delete-button"
+                      onClick={() => void deleteResource(resource)}
+                      disabled={deletingId === resource.id}
+                      aria-label={`Delete ${resource.name}`}
+                      title="Delete resource"
+                    >
+                      {deletingId === resource.id ? (
+                        <LoaderCircle className="spin" size={17} />
+                      ) : (
+                        <Trash2 size={17} />
+                      )}
+                    </button>
+                  </div>
                 </article>
               ))
             ) : (

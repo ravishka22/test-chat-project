@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["crawlee", "mammoth", "pdf-parse", "pg"],
+  serverExternalPackages: ["crawlee", "mammoth", "pdf-parse", "pg", "playwright"],
   turbopack: {
     root: projectRoot,
   },

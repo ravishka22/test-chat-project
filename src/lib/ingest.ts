@@ -1,7 +1,9 @@
+import crypto from "node:crypto";
 import { CheerioCrawler, log } from "crawlee";
 import * as cheerio from "cheerio";
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
+import type { Browser, BrowserContext } from "playwright";
 import { embedDocuments } from "@/lib/ai";
 import { chunkText, normalizeText } from "@/lib/chunk";
 import { query, transaction, vectorLiteral } from "@/lib/db";
@@ -10,13 +12,25 @@ import type { ResourceType } from "@/lib/types";
 
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_URL_BYTES = 10 * 1024 * 1024;
-const MAX_REDIRECTS = 10;
-const MAX_CRAWL_PAGES = 25;
+const MAX_REDIRECTS = 100;
+const MAX_CRAWL_PAGES = 1000;
 
 type CheerioSelector = (selector: string) => {
   attr(name: string): string | undefined;
   first(): { text(): string };
+  length: number;
   text(): string;
+};
+
+type PageTextResult = {
+  title: string;
+  text: string;
+  finalUrl: string;
+  pageCount: number;
+};
+
+type RenderedPageResult = PageTextResult & {
+  links: string[];
 };
 
 export interface IngestInput {
@@ -85,6 +99,181 @@ function extractReadableText(html: string, fallbackTitle: string) {
   return { title, text: validateExtractedText(bestReadableText($)) };
 }
 
+function isJavascriptAppShell(html: string) {
+  const $ = cheerio.load(html);
+  const bodyText = normalizeText($("body").text());
+  return (
+    bodyText.length < 120 &&
+    $("#root, #app").length > 0 &&
+    $('script[type="module"], script[src]').length > 0
+  );
+}
+
+function javascriptRenderedPageError(url: URL) {
+  return new Error(
+    `The page at ${url.hostname} is rendered by JavaScript, but the browser renderer could not extract enough readable text.`,
+  );
+}
+
+function playwrightInstallError(error: unknown) {
+  if (!(error instanceof Error)) return null;
+  if (
+    /Executable doesn't exist|playwright install|browserType\.launch/i.test(
+      error.message,
+    )
+  ) {
+    return new Error(
+      "JavaScript-rendered crawling requires the Playwright Chromium browser. Run `npx playwright install chromium`, then try again.",
+    );
+  }
+
+  return null;
+}
+
+function createSafeBrowserRequestGuard() {
+  const cache = new Map<string, Promise<boolean>>();
+
+  return async function isSafeBrowserRequest(rawUrl: string) {
+    if (
+      rawUrl === "about:blank" ||
+      rawUrl.startsWith("data:") ||
+      rawUrl.startsWith("blob:")
+    ) {
+      return true;
+    }
+
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      return false;
+    }
+
+    if (!["http:", "https:"].includes(url.protocol)) return false;
+    if (url.username || url.password) return false;
+
+    const key = url.origin;
+    if (!cache.has(key)) {
+      cache.set(
+        key,
+        assertSafePublicUrl(key)
+          .then(() => true)
+          .catch(() => false),
+      );
+    }
+
+    return cache.get(key)!;
+  };
+}
+
+async function withChromium<T>(
+  callback: (browser: Browser) => Promise<T>,
+): Promise<T> {
+  try {
+    const { chromium } = await import("playwright");
+    const browser = await chromium.launch({ headless: true });
+    try {
+      return await callback(browser);
+    } finally {
+      await browser.close();
+    }
+  } catch (error) {
+    throw playwrightInstallError(error) || error;
+  }
+}
+
+async function createBrowserContext(browser: Browser) {
+  const context = await browser.newContext({
+    userAgent: "AtlasKnowledgeBot/1.0",
+    viewport: { width: 1280, height: 900 },
+  });
+  const isSafeBrowserRequest = createSafeBrowserRequestGuard();
+
+  await context.route("**/*", async (route) => {
+    if (await isSafeBrowserRequest(route.request().url())) {
+      await route.continue();
+    } else {
+      await route.abort();
+    }
+  });
+
+  return context;
+}
+
+async function renderPublicPage(
+  context: BrowserContext,
+  rawUrl: string,
+): Promise<RenderedPageResult> {
+  const targetUrl = await assertSafePublicUrl(rawUrl);
+  const page = await context.newPage();
+
+  try {
+    const response = await page.goto(targetUrl.toString(), {
+      waitUntil: "domcontentloaded",
+      timeout: 60_000,
+    });
+
+    if (response && !response.ok()) {
+      throw new Error(`The URL returned HTTP ${response.status()}.`);
+    }
+
+    await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {
+      // Some modern sites keep analytics or live requests open. DOM text is
+      // still usable after the additional settling delay below.
+    });
+    await page.waitForTimeout(1_500);
+
+    const finalUrl = await assertSafePublicUrl(page.url());
+    const html = await page.content();
+    if (Buffer.byteLength(html, "utf8") > MAX_URL_BYTES) {
+      throw new Error("The rendered URL content is larger than 10 MB.");
+    }
+
+    const bodyText = await page
+      .locator("body")
+      .innerText({ timeout: 5_000 })
+      .catch(() => "");
+    const $ = cheerio.load(html);
+    $("script, style, nav, footer, header, form, svg, noscript, iframe").remove();
+
+    const title =
+      $('meta[property="og:title"]').attr("content")?.trim() ||
+      $("title").first().text().trim() ||
+      finalUrl.hostname;
+    const text = validateExtractedText(bestReadableText($) || bodyText);
+    const links = await page.$$eval("a[href]", (anchors) =>
+      anchors.map((anchor) => (anchor as HTMLAnchorElement).href),
+    );
+
+    return {
+      title,
+      text,
+      finalUrl: finalUrl.toString(),
+      pageCount: 1,
+      links,
+    };
+  } finally {
+    await page.close();
+  }
+}
+
+async function fetchRenderedPage(rawUrl: string): Promise<PageTextResult> {
+  return withChromium(async (browser) => {
+    const context = await createBrowserContext(browser);
+    try {
+      const page = await renderPublicPage(context, rawUrl);
+      return {
+        title: page.title,
+        text: page.text,
+        finalUrl: page.finalUrl,
+        pageCount: 1,
+      };
+    } finally {
+      await context.close();
+    }
+  });
+}
+
 async function fetchPublicPage(rawUrl: string) {
   let currentUrl = await assertSafePublicUrl(rawUrl);
 
@@ -133,6 +322,7 @@ async function fetchPublicPage(rawUrl: string) {
         title: filenameTitle(currentUrl),
         text: validateExtractedText(result.text.replace(/\0/g, "")),
         finalUrl: currentUrl.toString(),
+        pageCount: 1,
       };
     }
 
@@ -151,7 +341,12 @@ async function fetchPublicPage(rawUrl: string) {
         title: filenameTitle(currentUrl),
         text: validateExtractedText(body),
         finalUrl: currentUrl.toString(),
+        pageCount: 1,
       };
+    }
+
+    if (isJavascriptAppShell(body)) {
+      return fetchRenderedPage(currentUrl.toString());
     }
 
     const page = extractReadableText(body, currentUrl.hostname);
@@ -159,6 +354,7 @@ async function fetchPublicPage(rawUrl: string) {
       title: page.title,
       text: page.text,
       finalUrl: currentUrl.toString(),
+      pageCount: 1,
     };
   }
 
@@ -222,14 +418,96 @@ async function crawlPublicSite(rawUrl: string, maxPages: number) {
   await crawler.run([startUrl.toString()]);
 
   if (!pages.length) {
-    throw new Error("The crawler did not find enough readable text.");
+    return crawlRenderedPublicSite(startUrl.toString(), pageLimit);
   }
 
+  const orderedPages = [...pages].sort((a, b) => a.url.localeCompare(b.url));
   return {
     title: pages[0].title,
     finalUrl: startUrl.toString(),
+    pageCount: pages.length,
     text: validateExtractedText(
-      pages
+      orderedPages
+        .map((page, index) => `Page ${index + 1}: ${page.title}\nURL: ${page.url}\n${page.text}`)
+        .join("\n\n"),
+    ),
+  };
+}
+
+async function crawlRenderedPublicSite(rawUrl: string, maxPages: number) {
+  const startUrl = await assertSafePublicUrl(rawUrl);
+  const pageLimit = Math.max(1, Math.min(maxPages || 5, MAX_CRAWL_PAGES));
+  const origin = startUrl.origin;
+  const pages: Array<{ url: string; title: string; text: string }> = [];
+
+  await withChromium(async (browser) => {
+    const context = await createBrowserContext(browser);
+    const queue = [startUrl.toString()];
+    const visited = new Set<string>();
+
+    try {
+      while (queue.length && pages.length < pageLimit) {
+        const next = queue.shift()!;
+        let url: URL;
+        try {
+          url = await assertSafePublicUrl(next);
+        } catch {
+          continue;
+        }
+
+        url.hash = "";
+        const normalizedUrl = url.toString();
+        if (url.origin !== origin || visited.has(normalizedUrl)) continue;
+        visited.add(normalizedUrl);
+
+        let rendered: RenderedPageResult;
+        try {
+          rendered = await renderPublicPage(context, normalizedUrl);
+        } catch {
+          continue;
+        }
+
+        pages.push({
+          url: rendered.finalUrl,
+          title: rendered.title,
+          text: rendered.text,
+        });
+
+        for (const link of rendered.links) {
+          if (visited.size + queue.length >= pageLimit * 3) break;
+          try {
+            const linkUrl = await assertSafePublicUrl(link);
+            if (linkUrl.origin !== origin) continue;
+            linkUrl.hash = "";
+            const normalizedLink = linkUrl.toString();
+            if (
+              !visited.has(normalizedLink) &&
+              !queue.includes(normalizedLink)
+            ) {
+              queue.push(normalizedLink);
+            }
+          } catch {
+            // Ignore unsafe, malformed, or private links discovered in-page.
+          }
+        }
+      }
+    } finally {
+      await context.close();
+    }
+  });
+
+  if (!pages.length) {
+    throw javascriptRenderedPageError(startUrl);
+  }
+
+  const orderedPages = [...pages].sort((a, b) => a.url.localeCompare(b.url));
+  return {
+    title: pages[0].title,
+    finalUrl: startUrl.toString(),
+    pageCount: pages.length,
+    text: validateExtractedText(
+      orderedPages
+        .slice(0, pageLimit)
         .map((page, index) => `Page ${index + 1}: ${page.title}\nURL: ${page.url}\n${page.text}`)
         .join("\n\n"),
     ),
@@ -258,6 +536,7 @@ async function extractFileText(input: IngestInput) {
 export async function ingestResource(input: IngestInput) {
   let title = input.name;
   let sourceUrl = input.sourceUrl || null;
+  let pageCount = 0;
   let text: string;
 
   if (input.type === "url") {
@@ -267,11 +546,38 @@ export async function ingestResource(input: IngestInput) {
       : await fetchPublicPage(input.sourceUrl);
     title = input.name || page.title;
     sourceUrl = page.finalUrl;
+    pageCount = page.pageCount;
     text = page.text;
   } else if (input.type === "text") {
     text = validateExtractedText(input.content || "");
   } else {
     text = await extractFileText(input);
+  }
+
+  const contentHash = crypto.createHash("sha256").update(text).digest("hex");
+  const existing = await query<{ content_hash: string | null }>(
+    "SELECT content_hash FROM resources WHERE id = $1",
+    [input.id],
+  );
+  const unchanged =
+    Boolean(existing.rows[0]?.content_hash) &&
+    existing.rows[0]?.content_hash === contentHash;
+  const now = new Date();
+
+  if (unchanged) {
+    await query(
+      `UPDATE resources
+       SET name = $1, source_url = $2, status = 'ready', error = NULL,
+           page_count = $3, crawl_status = 'idle', crawl_error = NULL,
+           last_crawled_at = $4, updated_at = $4,
+           next_crawl_at = CASE
+             WHEN crawl_interval_minutes IS NULL THEN NULL
+             ELSE $4 + crawl_interval_minutes * INTERVAL '1 minute'
+           END
+       WHERE id = $5`,
+      [title, sourceUrl, pageCount, now, input.id],
+    );
+    return { changed: false, pageCount };
   }
 
   const chunks = chunkText(text);
@@ -304,7 +610,6 @@ export async function ingestResource(input: IngestInput) {
     }
   }
 
-  const now = new Date();
   await transaction(async (client) => {
     await client.query("DELETE FROM chunks WHERE resource_id = $1", [input.id]);
 
@@ -325,9 +630,31 @@ export async function ingestResource(input: IngestInput) {
     await client.query(
       `UPDATE resources
        SET name = $1, source_url = $2, content = $3, status = 'ready',
-           error = NULL, chunk_count = $4, updated_at = $5
-       WHERE id = $6`,
-      [title, sourceUrl, text, embeddedChunks.length, now, input.id],
+           error = NULL, chunk_count = $4, page_count = $5,
+           content_hash = $6, crawl_status = 'idle', crawl_error = NULL,
+           last_crawled_at = CASE WHEN type = 'url' THEN $7 ELSE last_crawled_at END,
+           last_content_change_at = CASE
+             WHEN type = 'url' THEN $7
+             ELSE last_content_change_at
+           END,
+           next_crawl_at = CASE
+             WHEN type <> 'url' OR crawl_interval_minutes IS NULL THEN NULL
+             ELSE $7 + crawl_interval_minutes * INTERVAL '1 minute'
+           END,
+           updated_at = $7
+       WHERE id = $8`,
+      [
+        title,
+        sourceUrl,
+        text,
+        embeddedChunks.length,
+        pageCount,
+        contentHash,
+        now,
+        input.id,
+      ],
     );
   });
+
+  return { changed: true, pageCount };
 }
